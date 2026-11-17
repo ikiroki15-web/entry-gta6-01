@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solara Bay — Streets of the Sun</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1622; font-family: "Segoe UI", system-ui, sans-serif; color: #fff; }
+  #app { position: fixed; inset: 0; }
+  #scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hud { position: absolute; pointer-events: none; user-select: none; }
+  #hud-top-left { top: 14px; left: 14px; max-width: 340px; }
+  #mission-box { background: rgba(8, 18, 30, .72); border-left: 4px solid #ffb300; padding: 8px 12px; border-radius: 6px; }
+  #mission-title { font-weight: 700; letter-spacing: .5px; font-size: 15px; }
+  #mission-text { font-size: 13px; opacity: .92; margin-top: 2px; line-height: 1.35; }
+  #mission-sub { font-size: 12px; color: #ffd54f; margin-top: 3px; }
+  #toast { margin-top: 10px; background: rgba(8,18,30,.72); padding: 7px 12px; border-radius: 6px; font-size: 13px; display: none; }
+  #hud-top-right { top: 14px; right: 14px; text-align: right; }
+  #stars { font-size: 26px; letter-spacing: 3px; color: #ffd54f; text-shadow: 0 2px 6px rgba(0,0,0,.7); min-height: 32px; }
+  #cash { font-size: 26px; font-weight: 800; text-shadow: 0 2px 6px rgba(0,0,0,.8); }
+  #cash small { font-size: 13px; font-weight: 400; opacity: .8; }
+  .bar { width: 210px; height: 12px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35); border-radius: 6px; margin: 4px 0 0 auto; overflow: hidden; }
+  .bar > div { height: 100%; }
+  #health-fill { background: linear-gradient(90deg, #43a047, #9ccc65); width: 100%; }
+  #armor-fill { background: linear-gradient(90deg, #1e88e5, #90caf9); width: 0%; }
+  #hud-bottom-left { left: 14px; bottom: 14px; }
+  #minimap { width: 200px; height: 200px; border-radius: 8px; border: 2px solid rgba(255,255,255,.5); background: #12202e; box-shadow: 0 4px 18px rgba(0,0,0,.5); }
+  #hud-bottom-right { right: 14px; bottom: 14px; text-align: right; }
+  #speed { font-size: 34px; font-weight: 800; text-shadow: 0 2px 8px rgba(0,0,0,.8); display: none; }
+  #speed small { font-size: 13px; font-weight: 400; }
+  #vehicle-name { font-size: 13px; opacity: .9; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+  #hint { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); font-size: 13px; background: rgba(8,18,30,.66); padding: 6px 12px; border-radius: 20px; white-space: nowrap; }
+  #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 22px; color: #fff; text-shadow: 0 0 4px #000; display: none; }
+  #ammo { position: absolute; right: 22px; bottom: 92px; font-size: 18px; font-weight: 700; text-shadow: 0 2px 6px rgba(0,0,0,.8); display: none; }
+  #clock { font-size: 13px; opacity: .85; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+  .screen { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at 50% 30%, rgba(255,150,40,.25), rgba(4,10,18,.88) 70%); }
+  .panel { width: min(620px, 92vw); background: rgba(6,14,24,.88); border: 1px solid rgba(255,179,0,.45); border-radius: 14px; padding: 28px 32px; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  .panel h1 { margin: 0; font-size: 44px; letter-spacing: 2px; color: #ffb300; }
+  .panel h1 span { color: #fff; font-size: 20px; display: block; letter-spacing: 6px; margin-top: 2px; }
+  .panel h2 { margin: 0 0 6px; font-size: 30px; color: #ffb300; }
+  .panel p { font-size: 14px; line-height: 1.55; opacity: .93; }
+  .panel .controls { font-size: 13px; line-height: 1.9; background: rgba(255,255,255,.06); border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
+  .panel .controls b { color: #ffd54f; }
+  .btnrow { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  button { pointer-events: auto; cursor: pointer; background: #ffb300; color: #1a1200; border: 0; border-radius: 8px; padding: 11px 20px; font-size: 15px; font-weight: 700; }
+  button.secondary { background: rgba(255,255,255,.14); color: #fff; }
+  button:hover { filter: brightness(1.12); }
+  #wasted { background: radial-gradient(ellipse at center, rgba(120,0,0,.55), rgba(10,0,0,.9)); }
+  #wasted h1 { color: #ff5252; }
+  #pause { background: rgba(4,10,18,.72); }
+  .hidden { display: none !important; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #0b1622; font-size: 16px; z-index: 5; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="scene"></canvas>
+  <div id="loading">Loading Solara Bay…</div>
+
+  <div class="hud" id="hud-top-left">
+    <div id="mission-box">
+      <div id="mission-title">Welcome to Solara Bay</div>
+      <div id="mission-text">Press Enter to start.</div>
+      <div id="mission-sub"></div>
+    </div>
+    <div id="toast"></div>
+  </div>
+  <div class="hud" id="hud-top-right">
+    <div id="stars"></div>
+    <div id="cash">$0</div>
+    <div id="clock">08:00</div>
+    <div class="bar"><div id="health-fill"></div></div>
+    <div class="bar"><div id="armor-fill"></div></div>
+  </div>
+  <div class="hud" id="hud-bottom-left"><canvas id="minimap" width="200" height="200"></canvas></div>
+  <div class="hud" id="hud-bottom-right">
+    <div id="vehicle-name"></div>
+    <div id="speed">0 <small>km/h</small></div>
+  </div>
+  <div class="hud" id="hint">WASD move &nbsp;·&nbsp; Shift run &nbsp;·&nbsp; E enter car &nbsp;·&nbsp; F punch &nbsp;·&nbsp; Click shoot</div>
+  <div class="hud" id="crosshair">+</div>
+  <div class="hud" id="ammo"></div>
+
+  <div class="screen" id="title-screen">
+    <div class="panel">
+      <h1>SOLARA BAY<span>STREETS OF THE SUN</span></h1>
+      <p><b>Rico Vale</b> just got out of the Solara Bay county lockup with $40, a borrowed
+      jacket and a debt to pay. The fixer <b>Mara Quinn</b> has work for him — if he can drive,
+      fight and stay ahead of the <b>Solara Bay Police</b> long enough to finish it. Steal cars,
+      run jobs, build your name, and don't get caught.</p>
+      <div class="controls">
+        <b>W A S D</b> move / drive &nbsp;·&nbsp; <b>Mouse drag</b> look around &nbsp;·&nbsp; <b>Shift</b> sprint<br>
+        <b>E</b> enter / exit car (steal parked &amp; traffic cars) &nbsp;·&nbsp; <b>Space</b> handbrake / jump<br>
+        <b>F</b> punch &nbsp;·&nbsp; <b>Mouse click</b> shoot pistol &nbsp;·&nbsp; <b>R</b> reload &nbsp;·&nbsp; <b>1 / 2</b> fists / pistol<br>
+        <b>P</b> save game &nbsp;·&nbsp; <b>Esc</b> pause &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; <b>C</b> change camera
+      </div>
+      <div class="btnrow">
+        <button id="btn-new">▶ New Game</button>
+        <button id="btn-continue" class="secondary hidden">Continue — saved game</button>
+        <button id="btn-how" class="secondary">How to play</button>
+      </div>
+      <p id="how-text" class="hidden">Follow the yellow marker. Gold = your next job. Blue = safe house.
+      Red = trouble. Wanted stars rise when the police see a crime — break line of sight and lay low
+      to cool off. Cars respawn at garages, health at the clinic, ammo at the gun shop. Your progress
+      saves automatically after every job, or press P any time.</p>
+      <p style="font-size:12px;opacity:.6">An original game. Solara Bay, its people and its streets are invented — no real city, no licensed cars, no borrowed characters.</p>
+    </div>
+  </div>
+
+  <div class="screen hidden" id="pause-screen">
+    <div class="panel">
+      <h2>Paused</h2>
+      <p>Take a breath, Rico. The city will wait.</p>
+      <div class="btnrow">
+        <button id="btn-resume">Resume</button>
+        <button id="btn-save" class="secondary">Save game</button>
+        <button id="btn-quit" class="secondary">Save &amp; quit to title</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen hidden" id="wasted-screen">
+    <div class="panel" id="wasted">
+      <h1 id="wasted-title">BUSTED</h1>
+      <p id="wasted-text">The Solara Bay Police took you in. You lost some cash, but Mara got you out again.</p>
+      <div class="btnrow"><button id="btn-retry">Back on the streets</button></div>
+    </div>
+  </div>
+</div>
+<script src="./vendor/three.min.js"></script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
