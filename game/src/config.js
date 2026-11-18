@@ -1,4 +1,5 @@
 // Shared constants and the story's mission chain. All names, places and people are original.
+// The 17.8 golden-hour shot time lives in main.js staging, not here, so normal play still starts at 08:00.
 export const SAVE_KEY = 'solara-bay-save-v1';
 export const STEP = 1 / 60;
 export const CITY = {

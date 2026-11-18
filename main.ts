@@ -3,6 +3,7 @@
 // (game/index.html, three.js vendored under game/vendor/, no network request), and the program
 // hands it in. It copies game/ and screenshots/ from beside this file to /output and writes
 // /output/dossier.json, the summary the judge reads, with the vendored make.fun library.
+// Round 3 rebuild: the same entry, rewritten inside a fresh recording so every file is witnessed.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:

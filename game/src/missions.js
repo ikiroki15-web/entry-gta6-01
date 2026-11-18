@@ -1,5 +1,6 @@
 // Mission state machine: five jobs for Rico, then free roam.
 // The game object passes in a small API (world hooks) so missions stay decoupled.
+// Sun Stashes run beside missions, never inside them, so collecting one can't break a job's state.
 import { MISSIONS, CITY } from './config.js';
 
 export function createMissions(api) {

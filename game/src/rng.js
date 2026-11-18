@@ -1,4 +1,5 @@
 // Deterministic random numbers: mulberry32. Same seed -> same city, same traffic.
+// The same stream also places the five random Sun Stashes, so their spots are stable per seed too.
 export function createRandom(seed) {
   let a = seed >>> 0;
   return {

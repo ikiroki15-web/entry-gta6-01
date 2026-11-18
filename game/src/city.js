@@ -1,5 +1,6 @@
 // The city of Solara Bay: a seeded grid of blocks, roads, towers, a beach and a bay.
 // Everything is built from boxes and canvas textures made in code — no external assets.
+// Stash spots are placed on walkable ground: isRoad/collideCircle keep them off roads and out of walls.
 import { CITY } from './config.js';
 
 function makeWindowTexture(rng, base, lit) {

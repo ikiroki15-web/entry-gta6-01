@@ -1,1 +1,2 @@
 out/
+# Local build output only; the entry itself is game/ + screenshots/.

@@ -1,4 +1,5 @@
 // Cars, traffic, police and pedestrians. All built from boxes — no borrowed models.
+// Traffic density went up for the round-2 shots (18 cars, 30 peds) — see spawnTraffic/spawnPeds in main.js.
 import { CAR, CAR_MODELS, CITY } from './config.js';
 
 const WHEEL_GEO = new THREE.CylinderGeometry(0.38, 0.38, 0.3, 10);

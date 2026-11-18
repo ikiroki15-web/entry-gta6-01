@@ -1,4 +1,5 @@
 // Synthesised sound: everything is generated with WebAudio, no audio files.
+// The pickup blip is also the Sun Stash collect cue — one sound, two uses.
 export function createAudio() {
   let ctx = null, master = null, muted = false;
   let engineOsc = null, engineGain = null, engineFilter = null;
