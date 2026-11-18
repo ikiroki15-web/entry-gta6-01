@@ -5,7 +5,7 @@ export function createHud() {
   const $ = id => document.getElementById(id);
   const els = {
     missionTitle: $('mission-title'), missionText: $('mission-text'), missionSub: $('mission-sub'),
-    toast: $('toast'), stars: $('stars'), cash: $('cash'), clock: $('clock'),
+    toast: $('toast'), stars: $('stars'), cash: $('cash'), clock: $('clock'), stash: $('stash'),
     health: $('health-fill'), armor: $('armor-fill'),
     speed: $('speed'), vehicle: $('vehicle-name'), hint: $('hint'),
     crosshair: $('crosshair'), ammo: $('ammo'), minimap: $('minimap'),
@@ -21,6 +21,7 @@ export function createHud() {
     toastTimer = setTimeout(() => { els.toast.style.display = 'none'; }, ms || 4200);
   }
   function setCash(v) { els.cash.innerHTML = '$' + v.toLocaleString('en-US') + ' <small>cash</small>'; }
+  function setStash(n, total) { els.stash.textContent = `✦ ${n}/${total} Sun Stashes`; }
   function setStars(n) { els.stars.textContent = n > 0 ? '★'.repeat(n) + '☆'.repeat(5 - n) : ''; }
   function setHealth(h, armor) {
     els.health.style.width = Math.max(0, h) + '%';
@@ -66,6 +67,8 @@ export function createHud() {
     const dot = (x, z, color, r) => { const [mx, mz] = toMap(x, z); mm.fillStyle = color; mm.beginPath(); mm.arc(mx, mz, r, 0, Math.PI * 2); mm.fill(); };
     // Mission target.
     if (world.missionTarget) dot(world.missionTarget.x, world.missionTarget.z, '#ffb300', 5);
+    // Uncollected Sun Stashes.
+    if (world.stashes) for (const s of world.stashes.list) if (!s.collected) dot(s.x, s.z, '#ffd54f', 3);
     // Safe house.
     dot(world.safehouse.x, world.safehouse.z, '#42a5f5', 3);
     // Police.
@@ -82,5 +85,5 @@ export function createHud() {
     mm.fillStyle = '#fff'; mm.font = 'bold 11px sans-serif'; mm.fillText('N', S / 2 - 4, 12);
   }
 
-  return { showObjective, setSub, toast, setCash, setStars, setHealth, setClock, setDriving, setArmed, setHint, drawMinimap, els };
+  return { showObjective, setSub, toast, setCash, setStash, setStars, setHealth, setClock, setDriving, setArmed, setHint, drawMinimap, els };
 }

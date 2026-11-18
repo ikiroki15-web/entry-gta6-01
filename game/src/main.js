@@ -7,6 +7,7 @@ import { createCity } from './city.js';
 import { makeCar, makePoliceCar, makePed, makePlayerMesh, driveCar, trafficStep, pedStep } from './entities.js';
 import { CAR_MODELS } from './config.js';
 import { createMissions } from './missions.js';
+import { createSunStashes, updateSunStashes } from './side.js';
 import { createHud } from './hud.js';
 import { stageShot } from './shots.js';
 
@@ -35,6 +36,7 @@ window.__debug = () => ({
   wanted: G.wanted, missionIndex: missions.state.index, missionActive: missions.isActive,
   target: G.missionTarget, cash: G.cash, health: G.health,
   police: G.policeCars.length, traffic: G.traffic.length,
+  stashes: stashes.collected + '/' + stashes.total,
   weapon: G.weapon, ammo: G.ammo, reserve: G.reserve, screen: G.screen,
 });
 
@@ -588,6 +590,13 @@ function update(dt, input) {
     audio.engine(0, false);
     hud.setDriving(null, 0);
   }
+  // The Sun Stash side activity: grab the hidden gold gems for $50 each.
+  updateSunStashes(stashes, G.player, dt, G.elapsed, () => {
+    addCash(stashes.value);
+    hud.setStash(stashes.collected, stashes.total);
+    audio.pickup();
+    hud.toast(`Sun Stash found! +$${stashes.value} (${stashes.collected}/${stashes.total})`);
+  });
   // Traffic & pedestrians.
   for (const c of G.traffic) trafficStep(c, dt, city, rng);
   for (const ped of G.peds) {
@@ -627,7 +636,7 @@ function update(dt, input) {
   updateCamera(dt);
   hud.drawMinimap({
     city, player: G.player, traffic: G.traffic, policeCars: G.policeCars,
-    missionTarget: G.missionTarget, safehouse: G.safehouse,
+    missionTarget: G.missionTarget, safehouse: G.safehouse, stashes,
   });
   if (!game.staging) renderer.render(scene, camera);
 }
@@ -638,7 +647,7 @@ const game = {
     // The boot already spawned traffic, peds and parked cars from the fixed seed;
     // staging only places the player and the camera, so shots stay deterministic.
     G.player.x = city.garage.x + 10; G.player.z = city.garage.z + 14;
-    G.time = 10.5;
+    G.time = 17.8; // golden hour: low sun, long shadows, sun-soaked streets
     hud.setCash(G.cash); hud.setHealth(100, 0);
     if (name === 'start') {
       showScreen('title');
@@ -647,11 +656,13 @@ const game = {
       playerMesh.group.rotation.y = 2.6;
     } else if (name === 'drive' || name === 'mission') {
       showScreen('play');
+      G.camMode = 1; // wider chase camera so the shot shows more of the city
       const car = G.parked[0];
       G.player.inCar = true; G.player.car = car; playerMesh.group.visible = false;
       if (name === 'drive') {
         // Cruise the central avenue so the shot shows the city, traffic and the HUD.
         car.x = 3.5; car.z = -120; car.heading = 0; car.speed = 14;
+        hud.showObjective('Free Roam — Solara Bay', 'Cruise Ocean Drive. Steal a faster car, grab Sun Stashes, keep the stars down.');
       } else {
         // Mission 1: on the road east of Mara's Garage, pointed at its marker.
         car.x = city.garage.x + 27 + 3.5; car.z = city.garage.z + 44; car.heading = Math.PI; car.speed = 12;
@@ -661,6 +672,7 @@ const game = {
       hud.setDriving(car.model.name, 40);
     } else if (name === 'chase') {
       showScreen('play');
+      G.camMode = 1; // wider chase camera so the interceptors read in-frame
       setWanted(3, 'The deal went loud!');
       const car = G.parked[0];
       G.player.inCar = true; G.player.car = car; playerMesh.group.visible = false;
@@ -726,9 +738,11 @@ function frame(now) {
 }
 
 // ---------- boot ----------
-spawnTraffic(12);
-spawnPeds(22);
+spawnTraffic(18);
+spawnPeds(30);
 spawnParked();
+const stashes = createSunStashes(scene, rng, city);
+hud.setStash(0, stashes.total);
 playerMesh.group.position.set(G.player.x, 0, G.player.z);
 refreshContinue();
 hud.setCash(G.cash);
