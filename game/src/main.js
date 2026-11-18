@@ -57,11 +57,10 @@ const G = {
   player: { x: 0, z: 0, heading: 0, speed: 0, inCar: false, car: null, moving: false },
   camYaw: 0, camPitch: 0.32, camDist: 9, camMode: 0,
   traffic: [], peds: [], policeCars: [], footCops: [],
-  parked: [], missionTarget: null, safehouse: null,
+  parked: [], missionTarget: null, safehouse: null, // set from missions.locations after createMissions — one snapped point, shared by HUD and missions
   tracers: [], elapsed: 0, muted: false,
   shotMode: !!shot,
 };
-G.safehouse = { x: CITY.half - CITY.pitch / 2, z: CITY.half - CITY.pitch / 2 };
 const playerMesh = makePlayerMesh(scene);
 
 // ---------- helpers ----------
@@ -92,8 +91,16 @@ function roadSpawnPoint() {
   const line = city.roadLines[Math.floor(rng.next() * city.roadLines.length)];
   const along = rng.range(-CITY.half, CITY.half);
   const horizontal = rng.chance(0.5);
-  return horizontal ? { x: along, z: line + 3.5, heading: rng.chance(0.5) ? 0 : Math.PI }
-                    : { x: line + 3.5, z: along, heading: rng.chance(0.5) ? Math.PI / 2 : -Math.PI / 2 };
+  // Heading convention: x += sin(h), z += cos(h), so h = 0 moves +z and
+  // h = PI/2 moves +x. A horizontal road (z fixed, x varies) therefore needs
+  // h = +/-PI/2; a vertical road (x fixed, z varies) needs h = 0/PI.
+  // Lane offset is right-hand: +3.5 for h = 0 / -PI/2, -3.5 for h = PI / PI/2.
+  if (horizontal) {
+    const east = rng.chance(0.5);
+    return { x: along, z: line + (east ? -3.5 : 3.5), heading: east ? Math.PI / 2 : -Math.PI / 2 };
+  }
+  const south = rng.chance(0.5);
+  return { x: line + (south ? 3.5 : -3.5), z: along, heading: south ? 0 : Math.PI };
 }
 function spawnTraffic(n) {
   for (let i = 0; i < n; i += 1) {
@@ -141,6 +148,10 @@ const missions = createMissions({
   addCash,
   setWanted,
   saveGame,
+  // City queries missions needs to keep its targets on reachable ground.
+  nearestRoadPoint: (x, z) => city.nearestRoadPoint(x, z),
+  isRoad: (x, z) => city.isRoad(x, z),
+  collideCircle: (x, z, r) => city.collideCircle(x, z, r),
   spawnGoon(x, z) {
     const goon = makePed(scene, rng, x, z);
     goon.health = 120; goon.state = 'goon'; goon.speed = 2.2;
@@ -150,6 +161,41 @@ const missions = createMissions({
     return goon;
   },
 });
+
+// The safe house has exactly one definition: the snapped point missions
+// computed (same point the HUD draws and Jobs 4/5 target).
+G.safehouse = missions.locations.safehouse;
+
+// Boot assert: every mission target must be reachable on foot. A target
+// inside a building footprint can never be completed, so fail loudly here
+// instead of shipping a game that quietly cannot be finished.
+(function assertMissionTargets() {
+  const loc = missions.locations;
+  const targets = [
+    { name: 'garage (Job 1/3 return)', x: loc.garage.x + 27, z: loc.garage.z, r: 8 },
+    ...loc.drops.map((d, i) => ({ name: `drop-off ${i + 1} (Job 2)`, x: d.x, z: d.z, r: 7 })),
+    { name: 'safehouse (Job 4/5)', x: loc.safehouse.x, z: loc.safehouse.z, r: 9 },
+    { name: 'bank (Job 5)', x: loc.bank.x, z: loc.bank.z + 14, r: 7 },
+    { name: 'pier (Job 3)', x: loc.pier.x, z: loc.pier.z, r: 7 },
+    { name: 'goon (Job 3)', x: loc.pier.x, z: loc.pier.z - 6, r: 7 },
+  ];
+  for (const t of targets) {
+    // Standable if the point itself fits a player, or any point within the
+    // atTarget radius does (the marker sits at a building's edge, for one).
+    let ok = !city.collideCircle(t.x, t.z, 1.5);
+    if (!ok) {
+      for (let a = 0; a < 8 && !ok; a += 1) {
+        const ang = (a * Math.PI) / 4;
+        ok = !city.collideCircle(t.x + Math.cos(ang) * t.r * 0.8, t.z + Math.sin(ang) * t.r * 0.8, 1.5);
+      }
+    }
+    if (!ok) {
+      console.error(`[boot] UNREACHABLE mission target: ${t.name} at (${t.x}, ${t.z}) — inside a building footprint`);
+      throw new Error(`Unreachable mission target: ${t.name}`);
+    }
+  }
+  console.log('[boot] mission targets reachable:', targets.map(t => t.name).join(', '));
+})();
 
 // ---------- input ----------
 const keys = new Set();
@@ -311,8 +357,11 @@ function toggleCar() {
 
 // ---------- combat ----------
 function nearestTarget(maxDist, maxAngle) {
-  const fx = Math.sin(camera.rotation.y), fz = Math.cos(camera.rotation.y);
-  // Use the player's facing when on foot: camera yaw matches player heading closely.
+  // Aim where the camera looks, not where the body faces: on foot the
+  // player's heading only changes while moving, but the camera yaw follows
+  // every mouse drag — standing still and turning to aim used to miss.
+  const aim = G.player.inCar ? G.player.heading : G.camYaw;
+  const ax = Math.sin(aim), az = Math.cos(aim);
   const px = G.player.x, pz = G.player.z;
   let best = null, bd = maxDist;
   const candidates = [...G.peds, ...G.footCops];
@@ -320,7 +369,7 @@ function nearestTarget(maxDist, maxAngle) {
     if (!t.alive) continue;
     const dx = t.x - px, dz = t.z - pz, d = Math.hypot(dx, dz);
     if (d > maxDist || d < 0.5) continue;
-    const dot = (dx * Math.sin(G.player.heading) + dz * Math.cos(G.player.heading)) / d;
+    const dot = (dx * ax + dz * az) / d;
     if (dot < Math.cos(maxAngle)) continue;
     if (d < bd) { bd = d; best = t; }
   }
@@ -336,7 +385,7 @@ function shoot() {
   if (G.ammo <= 0) { audio.click(); hud.toast('Out of ammo — press R, or visit Mara\'s Garage to restock.'); return; }
   G.ammo -= 1; audio.gunshot();
   const from = new THREE.Vector3(G.player.x, 1.5, G.player.z);
-  const dir = new THREE.Vector3(Math.sin(G.player.heading), -0.02, Math.cos(G.player.heading));
+  const dir = new THREE.Vector3(Math.sin(G.camYaw), -0.02, Math.cos(G.camYaw));
   const to = from.clone().add(dir.clone().multiplyScalar(45));
   tracer(from, to);
   const t = nearestTarget(45, 0.45);
@@ -376,10 +425,33 @@ function clearPolice() {
   for (const c of G.footCops) { c.alive = false; c.mesh.visible = false; }
   G.policeCars = []; G.footCops = [];
 }
+// Trim a police roster down to the wanted level's count, removing the
+// farthest units from the player first.
+function trimPolice(arr, want, remove) {
+  while (arr.length > want) {
+    let far = 0, fd = -1;
+    for (let i = 0; i < arr.length; i += 1) {
+      const d = Math.hypot(arr[i].x - G.player.x, arr[i].z - G.player.z);
+      if (d > fd) { fd = d; far = i; }
+    }
+    const u = arr.splice(far, 1)[0];
+    u.alive = false;
+    remove(u);
+  }
+}
 function policeStep(dt) {
   // How many units the wanted level calls for.
   const wantCars = G.wanted >= 1 ? Math.min(4, G.wanted) : 0;
   const wantCops = G.wanted >= 2 ? Math.min(3, G.wanted - 1) : 0;
+  // Drop dead units from the rosters first: a dead foot cop left in
+  // G.footCops blocked its replacement from ever spawning, and a corpse
+  // counted toward "nearest cop" so the heat could never cool off.
+  for (let i = G.footCops.length - 1; i >= 0; i -= 1) {
+    if (!G.footCops[i].alive) G.footCops.splice(i, 1);
+  }
+  for (let i = G.policeCars.length - 1; i >= 0; i -= 1) {
+    if (!G.policeCars[i].alive) { scene.remove(G.policeCars[i].mesh); G.policeCars.splice(i, 1); }
+  }
   while (G.policeCars.length < wantCars) {
     const p = roadSpawnPoint();
     // Spawn a block or two away from the player, on a road.
@@ -395,6 +467,10 @@ function policeStep(dt) {
     c.mesh.children[0].material = new THREE.MeshLambertMaterial({ color: 0x1a2a44 });
     G.footCops.push(c);
   }
+  // If the roster grew past what the wanted level calls for (heat dropped a
+  // star mid-chase), send the farthest units home first.
+  trimPolice(G.policeCars, wantCars, c => scene.remove(c.mesh));
+  trimPolice(G.footCops, wantCops, c => { c.mesh.visible = false; });
   // Chase: steer toward the player, ram when close.
   for (const car of G.policeCars) {
     if (!car.alive) continue;
@@ -424,10 +500,20 @@ function policeStep(dt) {
         G.player.car.speed *= 0.6; car.speed *= 0.4;
         if (Math.abs(G.player.car.speed) > 8) audio.crash();
       } else {
-        damagePlayer(12 * dt * 10, true);
+        damagePlayer(12 * dt, true);
+        // Shove the player away from the interceptor, but never through a
+        // wall: try the full push, then x-only, then z-only (same slide as
+        // movePlayer), so a ram against a building can't wedge Rico inside it.
         const d = Math.max(0.1, dist);
-        G.player.x += (G.player.x - car.x) / d * 2 * dt * 10;
-        G.player.z += (G.player.z - car.z) / d * 2 * dt * 10;
+        const kx = (G.player.x - car.x) / d * 2 * dt;
+        const kz = (G.player.z - car.z) / d * 2 * dt;
+        if (!city.collideCircle(G.player.x + kx, G.player.z + kz, PLAYER.radius)) {
+          G.player.x += kx; G.player.z += kz;
+        } else if (!city.collideCircle(G.player.x + kx, G.player.z, PLAYER.radius)) {
+          G.player.x += kx;
+        } else if (!city.collideCircle(G.player.x, G.player.z + kz, PLAYER.radius)) {
+          G.player.z += kz;
+        }
       }
     }
   }
@@ -447,9 +533,11 @@ function policeStep(dt) {
     cop.mesh.rotation.y = cop.heading;
   }
   // Wanted decay: stay out of sight and quiet, and the heat cools off.
+  // Only living units count — a corpse at its death spot used to pin the
+  // nearest-cop distance and keep the wanted level stuck forever.
   const nearestCop = Math.min(
-    ...G.policeCars.map(c => Math.hypot(c.x - G.player.x, c.z - G.player.z)),
-    ...G.footCops.map(c => Math.hypot(c.x - G.player.x, c.z - G.player.z)),
+    ...G.policeCars.filter(c => c.alive).map(c => Math.hypot(c.x - G.player.x, c.z - G.player.z)),
+    ...G.footCops.filter(c => c.alive).map(c => Math.hypot(c.x - G.player.x, c.z - G.player.z)),
     999);
   if (G.wanted > 0 && G.elapsed - G.lastCrime > 12 && nearestCop > 55) {
     G.quietTimer += dt;

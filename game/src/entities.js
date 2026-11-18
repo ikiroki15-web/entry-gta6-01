@@ -153,18 +153,20 @@ export function driveCar(car, input, dt, city) {
     if (!hitX) car.x = nx;
     if (!hitZ) car.z = nz;
     if (hitX && hitZ) { car.speed *= 0.4; }
-    return true;
+  } else {
+    car.x = nx; car.z = nz;
   }
-  car.x = nx; car.z = nz;
+  // Mesh, body roll and wheel spin update every frame, crash or not: they
+  // used to sit behind the early `return true` above, so a car grinding a
+  // wall froze in place and then teleported once it came free.
   car.mesh.position.set(car.x, 0, car.z);
   car.mesh.rotation.y = car.heading;
-  // Body roll and wheel spin for feel.
   car.mesh.rotation.z = -car.steer * Math.min(1, Math.abs(car.speed) / 20) * 0.06;
   const spin = car.speed * dt * 2.4;
   for (const w of car.wheels) w.rotation.x += spin;
   car.wheels[0].rotation.y = car.steer * 0.4;
   car.wheels[1].rotation.y = car.steer * 0.4;
-  return false;
+  return hit;
 }
 
 // --- traffic AI: follow the road grid, turn at intersections -----------------

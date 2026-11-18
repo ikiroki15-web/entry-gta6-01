@@ -78,7 +78,7 @@ export function createHud() {
     for (const c of world.traffic) if (c.alive) { const [mx, mz] = toMap(c.x, c.z); mm.fillRect(mx - 1, mz - 1, 2, 2); }
     // Player arrow.
     const [px, pz] = toMap(world.player.x, world.player.z);
-    mm.save(); mm.translate(px, pz); mm.rotate(-world.player.heading);
+    mm.save(); mm.translate(px, pz); mm.rotate(Math.PI - world.player.heading);
     mm.fillStyle = '#fff'; mm.beginPath(); mm.moveTo(0, -7); mm.lineTo(5, 5); mm.lineTo(-5, 5); mm.closePath(); mm.fill();
     mm.restore();
     // North tick.

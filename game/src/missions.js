@@ -11,14 +11,35 @@ export function createMissions(api) {
   };
   const { half, pitch } = CITY;
   const garage = { x: -half + pitch / 2, z: -half + pitch / 2 };
-  const safehouse = { x: half - pitch / 2, z: half - pitch / 2 };
   const bank = { x: half - pitch / 2, z: -half + pitch / 2 };
   const pier = { x: half - 60, z: half + 40 };
+  // A point is standable when a player-sized circle fits there without
+  // touching a building footprint.
+  const STAND_CLEAR = 1.5;
+  // Snap a target onto the nearest road: block-corner coordinates (multiples
+  // of pitch) land inside building footprints, where the atTarget radius can
+  // never be reached on foot. If the snapped road point itself is blocked
+  // (a building jutting onto the road), walk along that road until clear.
+  function snapToRoad(x, z) {
+    const p = api.nearestRoadPoint(x, z);
+    if (!api.collideCircle(p.x, p.z, STAND_CLEAR)) return p;
+    // nearestRoadPoint moved x onto a vertical road (runs along z) or moved
+    // z onto a horizontal road (runs along x) — walk that axis both ways.
+    const alongZ = p.x !== x;
+    for (let d = 2; d <= 40; d += 2) {
+      for (const s of [1, -1]) {
+        const q = alongZ ? { x: p.x, z: p.z + s * d } : { x: p.x + s * d, z: p.z };
+        if (!api.collideCircle(q.x, q.z, STAND_CLEAR)) return q;
+      }
+    }
+    return p; // still blocked — the boot assert in main.js will catch it loudly
+  }
+  const safehouse = snapToRoad(half - pitch / 2, half - pitch / 2);
   const drops = [
     { x: -half + pitch * 3.5, z: half - pitch * 1.5 },
     { x: half - pitch * 2.5, z: -half + pitch * 4.5 },
     { x: -half + pitch * 1.5, z: -half + pitch * 5.5 },
-  ];
+  ].map(d => snapToRoad(d.x, d.z));
 
   function setTarget(x, z, label) {
     state.target = { x, z, label };
