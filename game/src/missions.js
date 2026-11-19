@@ -7,8 +7,11 @@ export function createMissions(api) {
   const state = {
     index: 0, active: false, phase: 'idle', // idle | active | done
     timer: 0, deliverLeft: 0, target: null, goon: null, cashBag: null,
-    message: '', sub: '',
+    grabbed: false, message: '', sub: '',
   };
+  // The delayed "next job" start: tracked so a New Game (or a retry) can
+  // cancel it instead of having a finished job auto-start mid-run.
+  let nextTimer = null;
   const { half, pitch } = CITY;
   const garage = { x: -half + pitch / 2, z: -half + pitch / 2 };
   const bank = { x: half - pitch / 2, z: -half + pitch / 2 };
@@ -48,6 +51,7 @@ export function createMissions(api) {
   function clearTarget() { state.target = null; api.setBeacon(null); }
 
   function start(index) {
+    if (nextTimer) { clearTimeout(nextTimer); nextTimer = null; }
     state.index = index;
     const m = MISSIONS[index];
     if (!m) { state.phase = 'done'; state.message = 'All jobs done — free roam!'; state.sub = ''; api.showObjective('Free Roam', 'Solara Bay is yours. Drive, explore, and keep the stars down.'); clearTarget(); return; }
@@ -71,8 +75,13 @@ export function createMissions(api) {
     api.showObjective(m.title + ' — DONE', `+$${m.reward}. ${state.index + 1 < MISSIONS.length ? 'Next job unlocked.' : ''}`);
     clearTarget();
     state.active = false; state.phase = 'idle';
+    // Advance FIRST, then save: the save must record the next job, not the
+    // one just finished — saving before the advance let a reload replay the
+    // same job and collect its reward twice.
+    state.index += 1;
     api.saveGame();
-    setTimeout(() => start(state.index + 1), 1800);
+    if (nextTimer) clearTimeout(nextTimer);
+    nextTimer = setTimeout(() => { nextTimer = null; start(state.index); }, 1800);
   }
   function fail(reason) {
     api.audio.fail();
@@ -80,7 +89,20 @@ export function createMissions(api) {
     api.showObjective(MISSIONS[state.index].title + ' — FAILED', reason + ' Try again — press Enter to retry the job.');
     clearTarget();
     state.active = false; state.phase = 'idle';
-    api.setWanted(0);
+    // Deliberately no setWanted here: failing a job must not wipe the heat.
+    // (WASTED during Job 4/5 used to be a free wanted reset; now the cops
+    // keep hunting and the player retries the job with Enter.)
+  }
+
+  // Full run reset for New Game: no half-finished job, timer, goon, cash
+  // bag, or pending next-job start may survive into the fresh run.
+  function reset() {
+    if (nextTimer) { clearTimeout(nextTimer); nextTimer = null; }
+    state.index = 0; state.active = false; state.phase = 'idle';
+    state.timer = 0; state.deliverLeft = 0; state.target = null;
+    state.goon = null; state.cashBag = null; state.grabbed = false;
+    state.message = ''; state.sub = '';
+    clearTarget();
   }
 
   function atTarget(p, radius) {
@@ -129,7 +151,7 @@ export function createMissions(api) {
   }
 
   return {
-    state, start, update, complete, fail,
+    state, start, update, complete, fail, reset,
     retry() { start(state.index); },
     get current() { return MISSIONS[state.index] || null; },
     get isActive() { return state.active; },

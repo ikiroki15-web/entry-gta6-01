@@ -7,7 +7,7 @@ import { createCity } from './city.js';
 import { makeCar, makePoliceCar, makePed, makePlayerMesh, driveCar, trafficStep, pedStep } from './entities.js';
 import { CAR_MODELS } from './config.js';
 import { createMissions } from './missions.js';
-import { createSunStashes, updateSunStashes } from './side.js';
+import { createSunStashes, updateSunStashes, stashSaveData, restoreSunStashes, resetSunStashes } from './side.js';
 import { createHud } from './hud.js';
 import { stageShot } from './shots.js';
 
@@ -113,8 +113,16 @@ function spawnTraffic(n) {
 }
 function spawnPeds(n) {
   for (let i = 0; i < n; i += 1) {
-    const x = rng.range(-CITY.half, CITY.half), z = rng.range(-CITY.half, CITY.half);
-    if (city.isRoad(x, z)) continue;
+    // A ped spawned inside a building footprint can never walk out: every
+    // step collides, so pedStep just spins it in place forever. Keep drawing
+    // sidewalk spots until one fits a player-sized circle — but cap the
+    // tries, so a pathological seed can't hang the boot in an infinite loop.
+    let x = 0, z = 0, clean = false;
+    for (let attempt = 0; attempt < 12 && !clean; attempt += 1) {
+      x = rng.range(-CITY.half, CITY.half); z = rng.range(-CITY.half, CITY.half);
+      clean = !city.isRoad(x, z) && !city.collideCircle(x, z, 0.5);
+    }
+    if (!clean) continue; // no clean sidewalk spot in 12 tries — skip this ped
     G.peds.push(makePed(scene, rng, x, z));
   }
 }
@@ -259,6 +267,7 @@ function saveGame() {
       cash: G.cash, health: G.health, missionIndex: missions.state.index,
       x: G.player.x, z: G.player.z, wanted: G.wanted,
       ammo: G.ammo, reserve: G.reserve, time: G.time,
+      stashes: stashSaveData(stashes),
     }));
   } catch { /* private mode */ }
 }
@@ -272,18 +281,62 @@ function refreshContinue() {
   $('btn-continue').classList.toggle('hidden', !loadSave());
 }
 
+// One place that owns "a fresh run": every piece of state that can leak
+// from a previous run — mission progress, police, stashes, timers, weapon,
+// tracers, the street population — is cleared here, so a New Game can never
+// inherit a half-finished job (or a goon already down, or a stash already
+// taken) and complete a mission the instant it starts. New Game goes
+// through this; Continue deliberately does not — it restores the save.
+function resetRun() {
+  // Chase / combat transients.
+  clearPolice();
+  for (const t of G.tracers) scene.remove(t.line);
+  G.tracers = [];
+  // Player.
+  G.player.inCar = false; G.player.car = null;
+  G.player.heading = 0; G.player.speed = 0; G.player.moving = false;
+  playerMesh.group.visible = true;
+  G.player.x = city.garage.x + 10; G.player.z = city.garage.z + 14;
+  playerMesh.group.position.set(G.player.x, 0, G.player.z);
+  // Economy / combat / clocks.
+  G.cash = 40; G.health = 100; G.armor = 0;
+  G.ammo = 12; G.reserve = 36;
+  setWeapon('fists');
+  G.crimeTimer = 0; G.quietTimer = 0; G.lastCrime = -999;
+  G.elapsed = 0; G.time = 8;
+  setWanted(0);
+  // Camera.
+  G.camYaw = 0; G.camPitch = 0.32; G.camDist = 9; G.camMode = 0;
+  // Missions and side activity (missions.reset also clears the pending
+  // "next job" timer, so a completed job can't auto-start mid-new-game).
+  missions.reset();
+  resetSunStashes(stashes);
+  hud.setStash(0, stashes.total);
+  // Street population, fresh: no stolen-car driver, goon, or corpse from
+  // the last run lingers, and no parked car stays where the player left it.
+  for (const c of [...G.traffic, ...G.parked]) scene.remove(c.mesh);
+  for (const p of G.peds) scene.remove(p.mesh);
+  G.traffic = []; G.peds = []; G.parked = [];
+  spawnTraffic(18); spawnPeds(30); spawnParked();
+}
+
 function startGame(fromSave) {
   const save = fromSave ? loadSave() : null;
   if (save) {
+    // Continue: restore progress, but drop transient chase state — a police
+    // roster or tracer from the last session must not leak into this one.
+    // (The wanted level itself is restored; policeStep respawns the units.)
+    clearPolice();
+    for (const t of G.tracers) scene.remove(t.line);
+    G.tracers = [];
     G.cash = save.cash; G.health = save.health; G.ammo = save.ammo; G.reserve = save.reserve;
     G.time = save.time || 8; G.player.x = save.x; G.player.z = save.z;
     missions.state.index = save.missionIndex || 0;
+    if (save.stashes) restoreSunStashes(stashes, save.stashes);
+    hud.setStash(stashes.collected, stashes.total);
     setWanted(save.wanted || 0);
   } else {
-    G.cash = 40; G.health = 100; G.ammo = 12; G.reserve = 36; G.time = 8;
-    G.player.x = city.garage.x + 10; G.player.z = city.garage.z + 14;
-    missions.state.index = 0;
-    setWanted(0);
+    resetRun();
   }
   hud.setCash(G.cash); hud.setHealth(G.health, G.armor);
   showScreen('play');
@@ -295,15 +348,24 @@ function startGame(fromSave) {
 function pauseGame() { showScreen('paused'); audio.engineStop(); audio.siren(false); }
 function resumeGame() { if (G.screen === 'paused') { showScreen('play'); audio.unlock(); } }
 function respawn() {
+  // Death costs the job, not the heat: an active mission fails (fail() no
+  // longer touches wanted), but the wanted level stays — Rico walks out of
+  // the clinic with the police still hunting him, so dying mid-chase can
+  // never be used to wipe stars for free. The units themselves are cleared
+  // and respawn from policeStep; the player retries the job with Enter.
+  const missionWasActive = missions.isActive;
   G.health = 100; G.cash = Math.max(0, G.cash - 200);
   G.player.x = city.clinic.x; G.player.z = city.clinic.z + 12;
   G.player.inCar = false; G.player.car = null;
-  setWanted(0); hud.setCash(G.cash); hud.setHealth(100, 0);
+  playerMesh.group.visible = true; // died in a car? the mesh was hidden
+  if (missionWasActive) missions.fail('Rico went down — the job is blown. The cops are still looking for you.');
+  setWanted(G.wanted); // re-assert stars + siren without changing the level
+  hud.setCash(G.cash); hud.setHealth(100, 0);
   playerMesh.group.position.set(G.player.x, 0, G.player.z);
   clearPolice();
   showScreen('play');
   hud.toast('Mara bailed you out. $200 lighter. Don\'t make it a habit.');
-  if (!missions.isActive) missions.retry();
+  if (!missions.isActive && !missionWasActive) missions.retry();
 }
 function wasted(busted) {
   $('wasted-title').textContent = busted ? 'BUSTED' : 'WASTED';
@@ -462,7 +524,10 @@ function policeStep(dt) {
     G.policeCars.push(car);
   }
   while (G.footCops.length < wantCops) {
-    const c = makePed(scene, rng, G.player.x + rng.range(-18, 18), G.player.z + rng.range(-18, 18));
+    // Spawn on the nearest road, not wherever the dice land: a cop spawned
+    // inside a building footprint would chase Rico straight through its walls.
+    const near = city.nearestRoadPoint(G.player.x + rng.range(-18, 18), G.player.z + rng.range(-18, 18));
+    const c = makePed(scene, rng, near.x, near.z);
     c.kind = 'cop'; c.health = 60; c.speed = 3.4; c.state = 'cop';
     c.mesh.children[0].material = new THREE.MeshLambertMaterial({ color: 0x1a2a44 });
     G.footCops.push(c);
@@ -484,8 +549,17 @@ function policeStep(dt) {
     car.speed = Math.min(30, car.speed + 14 * dt);
     const nx = car.x + Math.sin(car.heading) * car.speed * dt;
     const nz = car.z + Math.cos(car.heading) * car.speed * dt;
-    if (!city.collideCircle(nx, nz, 1.3)) { car.x = nx; car.z = nz; }
-    else { car.speed *= 0.5; }
+    if (!city.collideCircle(nx, nz, 1.3)) { car.x = nx; car.z = nz; car.stuck = 0; }
+    else if (!city.collideCircle(nx, car.z, 1.3)) { car.x = nx; car.stuck = 0; }
+    else if (!city.collideCircle(car.x, nz, 1.3)) { car.z = nz; car.stuck = 0; }
+    else {
+      // Nose-first into a wall: slide failed on both axes, so stop grinding
+      // and, after half a second wedged, back up and turn away instead of
+      // sitting against the building for the rest of the chase.
+      car.speed *= 0.5;
+      car.stuck += 1;
+      if (car.stuck > 30) { car.heading += Math.PI / 2; car.speed = -6; car.stuck = 0; }
+    }
     car.mesh.position.set(car.x, 0, car.z);
     car.mesh.rotation.y = car.heading;
     car.mesh.rotation.z = -Math.max(-1, Math.min(1, dh)) * 0.05;
@@ -523,8 +597,15 @@ function policeStep(dt) {
     const dist = Math.hypot(dx, dz);
     cop.heading = Math.atan2(dx, dz);
     if (dist > 1.6) {
-      cop.x += Math.sin(cop.heading) * cop.speed * dt;
-      cop.z += Math.cos(cop.heading) * cop.speed * dt;
+      // Chase on foot, but never through a wall: try the full step, then
+      // slide along one axis (same as the player), and only when fully
+      // cornered sidestep around the blockage.
+      const nx = cop.x + Math.sin(cop.heading) * cop.speed * dt;
+      const nz = cop.z + Math.cos(cop.heading) * cop.speed * dt;
+      if (!city.collideCircle(nx, nz, 0.5)) { cop.x = nx; cop.z = nz; }
+      else if (!city.collideCircle(nx, cop.z, 0.5)) cop.x = nx;
+      else if (!city.collideCircle(cop.x, nz, 0.5)) cop.z = nz;
+      else cop.heading += Math.PI / 2;
     } else {
       damagePlayer(10 * dt, true);
       cop.armL.rotation.x = -1.2; cop.armR.rotation.x = -1.2;

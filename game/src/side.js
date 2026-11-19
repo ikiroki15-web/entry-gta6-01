@@ -48,3 +48,23 @@ export function updateSunStashes(stashSet, player, dt, elapsed, onCollect) {
     }
   }
 }
+
+// Stash state is saveable data, not scenery: which gems are already taken
+// goes into the save (and comes back on load), so save/load can't re-farm
+// the same $50 stash, and a New Game can reset them all in one place.
+export function stashSaveData(stashSet) {
+  return stashSet.list.map(s => s.collected);
+}
+export function restoreSunStashes(stashSet, collected) {
+  if (!Array.isArray(collected)) return;
+  stashSet.collected = 0;
+  stashSet.list.forEach((s, i) => {
+    s.collected = !!collected[i];
+    s.mesh.visible = !s.collected;
+    if (s.collected) stashSet.collected += 1;
+  });
+}
+export function resetSunStashes(stashSet) {
+  stashSet.collected = 0;
+  for (const s of stashSet.list) { s.collected = false; s.mesh.visible = true; }
+}

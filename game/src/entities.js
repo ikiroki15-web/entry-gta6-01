@@ -156,6 +156,11 @@ export function driveCar(car, input, dt, city) {
   } else {
     car.x = nx; car.z = nz;
   }
+  // Never leave the world: clamp to the city bounds (same edge the player
+  // walks against), so a car can't be driven out past the beach into the
+  // bay or the empty ground beyond the map.
+  const clamped = city.clampToCity(car.x, car.z);
+  car.x = clamped.x; car.z = clamped.z;
   // Mesh, body roll and wheel spin update every frame, crash or not: they
   // used to sit behind the early `return true` above, so a car grinding a
   // wall froze in place and then teleported once it came free.
