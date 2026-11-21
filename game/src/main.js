@@ -1,10 +1,10 @@
 // Solara Bay — Streets of the Sun. An original open-world crime game.
 // Boot, loop, player, wanted system, police, combat, camera, save, screens and shots.
-import { SAVE_KEY, STEP, CITY, PLAYER, MISSIONS, STORY_END } from './config.js';
+import { SAVE_KEY, STEP, CITY, PLAYER, MISSIONS, STORY_END, ARMOR, IFRAME_SECONDS, sanitizeSave, applyDamage, addHeat, intAmmo } from './config.js';
 import { createRandom } from './rng.js';
 import { createAudio } from './audio.js';
 import { createCity } from './city.js';
-import { makeCar, makePoliceCar, makePed, makePlayerMesh, driveCar, trafficStep, pedStep } from './entities.js';
+import { makeCar, makePoliceCar, makePed, makePlayerMesh, driveCar, trafficStep, pedStep, damageCar, resolveCarCollisions, pushPedOutOfCar } from './entities.js';
 import { CAR_MODELS } from './config.js';
 import { createMissions } from './missions.js';
 import { createSunStashes, updateSunStashes, stashSaveData, restoreSunStashes, resetSunStashes } from './side.js';
@@ -38,10 +38,15 @@ window.__debug = () => ({
   police: G.policeCars.length, traffic: G.traffic.length,
   stashes: stashes.collected + '/' + stashes.total,
   weapon: G.weapon, ammo: G.ammo, reserve: G.reserve, screen: G.screen,
+  armor: G.armor, heat: G.heat,
+  carHealth: G.player.car ? G.player.car.health : null,
 });
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
+  // Refresh the pixel ratio too: dragging the window to a display with a
+  // different density used to leave the canvas blurry (or oversized).
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(w, h, false);
   camera.aspect = w / h; camera.updateProjectionMatrix();
 }
@@ -51,9 +56,13 @@ window.addEventListener('resize', resize); resize();
 const G = {
   screen: 'title', // title | play | paused | wasted
   time: 8.0, // hour of day
-  cash: 40, health: 100, armor: 0, wanted: 0,
+  cash: 40, health: 100, armor: ARMOR.start, wanted: 0,
   weapon: 'fists', ammo: 12, reserve: 36,
   crimeTimer: 0, quietTimer: 0, lastCrime: -999,
+  heat: 0, // fractional wanted progress from non-lethal aggression
+  lastHitAt: -999, // last time damage landed (i-frame gate)
+  restockAcc: 0, // garage ammo restock accumulator (whole rounds only)
+  lastMinimapAt: -1, lastMinimapX: 1e9, lastMinimapZ: 1e9, // minimap throttle
   player: { x: 0, z: 0, heading: 0, speed: 0, inCar: false, car: null, moving: false },
   camYaw: 0, camPitch: 0.32, camDist: 9, camMode: 0,
   traffic: [], peds: [], policeCars: [], footCops: [],
@@ -80,10 +89,20 @@ function setWanted(n, reason) {
   if (G.wanted > before && reason) hud.toast(reason);
   if (G.wanted > 0) audio.siren(true); else audio.siren(false);
   G.quietTimer = 0;
+  if (G.wanted === 0) G.heat = 0; // fully clean: leftover fractions clear too
 }
 function commitCrime(stars, reason) {
   G.lastCrime = G.elapsed;
   setWanted(G.wanted + stars, reason);
+}
+// Non-lethal aggression (a punch that connects, a reckless bump) does
+// not deserve a full star on its own — it adds fractional heat, and
+// only a whole star's worth raises the wanted level.
+function addHeatCrime(amount, reason) {
+  const r = addHeat(G.heat, amount);
+  G.heat = r.heat;
+  G.lastCrime = G.elapsed;
+  if (r.stars > 0) setWanted(G.wanted + r.stars, reason);
 }
 
 // ---------- spawning ----------
@@ -254,6 +273,8 @@ function setWeapon(w) {
   if (w === 'pistol') audio.click();
 }
 function reload() {
+  // Whole rounds only, at consumption as well as on the HUD.
+  G.ammo = intAmmo(G.ammo); G.reserve = intAmmo(G.reserve);
   if (G.weapon !== 'pistol' || G.ammo >= 12 || G.reserve <= 0) return;
   const need = 12 - G.ammo, take = Math.min(need, G.reserve);
   G.ammo += take; G.reserve -= take; audio.reload();
@@ -264,17 +285,20 @@ function reload() {
 function saveGame() {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
-      cash: G.cash, health: G.health, missionIndex: missions.state.index,
+      cash: Math.floor(G.cash), health: G.health, armor: G.armor, missionIndex: missions.state.index,
       x: G.player.x, z: G.player.z, wanted: G.wanted,
-      ammo: G.ammo, reserve: G.reserve, time: G.time,
+      ammo: intAmmo(G.ammo), reserve: intAmmo(G.reserve), time: G.time,
       stashes: stashSaveData(stashes),
     }));
   } catch { /* private mode */ }
 }
+// The parsed save is never trusted raw: sanitizeSave type-checks and
+// clamps every field, so a hand-edited or partly corrupt save loads as
+// a playable game instead of poisoning health, cash or position.
 function loadSave() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    return raw ? sanitizeSave(JSON.parse(raw)) : null;
   } catch { return null; }
 }
 function refreshContinue() {
@@ -299,10 +323,11 @@ function resetRun() {
   G.player.x = city.garage.x + 10; G.player.z = city.garage.z + 14;
   playerMesh.group.position.set(G.player.x, 0, G.player.z);
   // Economy / combat / clocks.
-  G.cash = 40; G.health = 100; G.armor = 0;
+  G.cash = 40; G.health = 100; G.armor = ARMOR.start;
   G.ammo = 12; G.reserve = 36;
   setWeapon('fists');
   G.crimeTimer = 0; G.quietTimer = 0; G.lastCrime = -999;
+  G.heat = 0; G.lastHitAt = -999; G.restockAcc = 0;
   G.elapsed = 0; G.time = 8;
   setWanted(0);
   // Camera.
@@ -329,12 +354,20 @@ function startGame(fromSave) {
     clearPolice();
     for (const t of G.tracers) scene.remove(t.line);
     G.tracers = [];
-    G.cash = save.cash; G.health = save.health; G.ammo = save.ammo; G.reserve = save.reserve;
-    G.time = save.time || 8; G.player.x = save.x; G.player.z = save.z;
-    missions.state.index = save.missionIndex || 0;
-    if (save.stashes) restoreSunStashes(stashes, save.stashes);
+    // `save` is already sanitized (types checked, ranges clamped).
+    G.cash = save.cash; G.health = save.health; G.armor = save.armor;
+    G.ammo = save.ammo; G.reserve = save.reserve;
+    G.time = save.time; G.player.x = save.x; G.player.z = save.z;
+    // A saved position inside a building footprint would wedge Rico in
+    // a wall forever — fall back to the garage spawn instead.
+    if (city.collideCircle(G.player.x, G.player.z, PLAYER.radius)) {
+      G.player.x = city.garage.x + 10; G.player.z = city.garage.z + 14;
+    }
+    G.heat = 0; G.lastHitAt = -999; G.restockAcc = 0;
+    missions.state.index = save.missionIndex;
+    restoreSunStashes(stashes, save.stashes);
     hud.setStash(stashes.collected, stashes.total);
-    setWanted(save.wanted || 0);
+    setWanted(save.wanted);
   } else {
     resetRun();
   }
@@ -354,13 +387,13 @@ function respawn() {
   // never be used to wipe stars for free. The units themselves are cleared
   // and respawn from policeStep; the player retries the job with Enter.
   const missionWasActive = missions.isActive;
-  G.health = 100; G.cash = Math.max(0, G.cash - 200);
+  G.health = 100; G.armor = ARMOR.start; G.cash = Math.max(0, G.cash - 200);
   G.player.x = city.clinic.x; G.player.z = city.clinic.z + 12;
   G.player.inCar = false; G.player.car = null;
   playerMesh.group.visible = true; // died in a car? the mesh was hidden
   if (missionWasActive) missions.fail('Rico went down — the job is blown. The cops are still looking for you.');
   setWanted(G.wanted); // re-assert stars + siren without changing the level
-  hud.setCash(G.cash); hud.setHealth(100, 0);
+  hud.setCash(G.cash); hud.setHealth(100, G.armor);
   playerMesh.group.position.set(G.player.x, 0, G.player.z);
   clearPolice();
   showScreen('play');
@@ -389,6 +422,7 @@ function nearestCar(maxDist) {
 function toggleCar() {
   if (G.player.inCar) {
     const car = G.player.car;
+    car.isPlayerCar = false;
     G.player.inCar = false; G.player.car = null;
     G.player.x = car.x + Math.sin(car.heading + Math.PI / 2) * 2.5;
     G.player.z = car.z + Math.cos(car.heading + Math.PI / 2) * 2.5;
@@ -411,6 +445,7 @@ function toggleCar() {
     hud.toast('You jacked the ' + car.model.name + '! (+1 ★)');
   }
   G.player.inCar = true; G.player.car = car;
+  car.isPlayerCar = true;
   playerMesh.group.visible = false;
   audio.doorSlam(); audio.engineStart();
   hud.setDriving(car.model.name, 0);
@@ -455,7 +490,11 @@ function shoot() {
     t.health -= 34;
     tracer(from, new THREE.Vector3(t.x, 1.2, t.z));
     if (t.health <= 0) killPed(t);
-    else { t.panic = 4; }
+    else {
+      t.panic = 4;
+      // A non-lethal hit still draws attention (the goon is off the books).
+      if (t.state !== 'goon') addHeatCrime(0.5, 'Shots fired! The police are coming.');
+    }
   }
   hud.setArmed(true, G.ammo, G.reserve);
   if (G.ammo === 0) hud.toast('Magazine empty — press R to reload.');
@@ -468,6 +507,10 @@ function punch() {
   if (!t) return;
   t.health -= 16;
   t.panic = 2;
+  // Landing a punch is assault even when nobody goes down.
+  if (t.state !== 'goon' && t.health > 0) {
+    addHeatCrime(t.kind === 'cop' ? 0.5 : 0.34, 'Assault! The police are on to you.');
+  }
   const dx = t.x - G.player.x, dz = t.z - G.player.z, d = Math.hypot(dx, dz) || 1;
   t.x += (dx / d) * 1.2; t.z += (dz / d) * 1.2;
   if (t.health <= 0) killPed(t);
@@ -533,12 +576,18 @@ function policeStep(dt) {
     G.footCops.push(c);
   }
   // If the roster grew past what the wanted level calls for (heat dropped a
-  // star mid-chase), send the farthest units home first.
-  trimPolice(G.policeCars, wantCars, c => scene.remove(c.mesh));
-  trimPolice(G.footCops, wantCops, c => { c.mesh.visible = false; });
+  // star mid-chase), send the farthest units home first. Screenshot
+  // staging hand-places its roster (four interceptors at 3 stars), so
+  // trimming is skipped there — the staged frame must keep its cast.
+  if (!G.shotMode) {
+    trimPolice(G.policeCars, wantCars, c => scene.remove(c.mesh));
+    trimPolice(G.footCops, wantCops, c => { c.mesh.visible = false; });
+  }
   // Chase: steer toward the player, ram when close.
   for (const car of G.policeCars) {
     if (!car.alive) continue;
+    if (car.health <= 0) { car.alive = false; continue; } // wrecked interceptor is out
+    car.ramCd = Math.max(0, car.ramCd - dt);
     const dx = G.player.x - car.x, dz = G.player.z - car.z;
     const dist = Math.hypot(dx, dz);
     const wantHeading = Math.atan2(dx, dz);
@@ -573,8 +622,18 @@ function policeStep(dt) {
       if (G.player.inCar && G.player.car) {
         G.player.car.speed *= 0.6; car.speed *= 0.4;
         if (Math.abs(G.player.car.speed) > 8) audio.crash();
+        // The ram lands on the car first — but a wrecked car stops
+        // protecting Rico, so he is never fully safe behind the wheel.
+        if (car.ramCd <= 0) {
+          car.ramCd = 0.5;
+          damageCar(G.player.car, 7);
+          damageCar(car, 3);
+          if (G.player.car.health < 30) damagePlayer(4, true);
+        }
       } else {
-        damagePlayer(12 * dt, true);
+        // Discrete ram hits (the i-frame gate in damagePlayer caps the
+        // rate), never a per-step drain that melts 100 HP in a second.
+        if (car.ramCd <= 0) { car.ramCd = 0.6; damagePlayer(6, true); }
         // Shove the player away from the interceptor, but never through a
         // wall: try the full push, then x-only, then z-only (same slide as
         // movePlayer), so a ram against a building can't wedge Rico inside it.
@@ -593,6 +652,7 @@ function policeStep(dt) {
   }
   for (const cop of G.footCops) {
     if (!cop.alive) continue;
+    cop.hitCd = Math.max(0, (cop.hitCd || 0) - dt);
     const dx = G.player.x - cop.x, dz = G.player.z - cop.z;
     const dist = Math.hypot(dx, dz);
     cop.heading = Math.atan2(dx, dz);
@@ -607,8 +667,14 @@ function policeStep(dt) {
       else if (!city.collideCircle(cop.x, nz, 0.5)) cop.z = nz;
       else cop.heading += Math.PI / 2;
     } else {
-      damagePlayer(10 * dt, true);
       cop.armL.rotation.x = -1.2; cop.armR.rotation.x = -1.2;
+      // One solid hit every 0.7 s instead of a continuous drain. In a
+      // car, the blows land on the bodywork until it is wrecked.
+      if (cop.hitCd <= 0) {
+        cop.hitCd = 0.7;
+        if (G.player.inCar && G.player.car && G.player.car.health > 0) damageCar(G.player.car, 9);
+        else damagePlayer(7, true);
+      }
     }
     cop.mesh.position.set(cop.x, 0, cop.z);
     cop.mesh.rotation.y = cop.heading;
@@ -633,9 +699,12 @@ function policeStep(dt) {
 }
 function damagePlayer(amount, byCop) {
   if (G.screen !== 'play') return;
-  let left = amount;
-  if (G.armor > 0) { const absorbed = Math.min(G.armor, left); G.armor -= absorbed; left -= absorbed; }
-  G.health -= left;
+  // I-frames: at most one hit lands per IFRAME_SECONDS, so stacked
+  // attackers on foot cannot delete Rico in under a second.
+  if (G.elapsed - G.lastHitAt < IFRAME_SECONDS) return;
+  const r = applyDamage(G.health, G.armor, amount);
+  G.health = r.health; G.armor = r.armor;
+  G.lastHitAt = G.elapsed;
   hud.setHealth(G.health, G.armor);
   if (G.health <= 0) wasted(byCop && G.wanted > 0);
 }
@@ -666,6 +735,15 @@ function movePlayer(dt, input) {
     p.heading = Math.atan2(wx, wz);
     const clamped = city.clampToCity(p.x, p.z);
     p.x = clamped.x; p.z = clamped.z;
+    // Cars are solid on foot too: never walk through a body panel.
+    for (const car of [...G.parked, ...G.traffic, ...G.policeCars]) {
+      if (!car.alive) continue;
+      const dx = p.x - car.x, dz = p.z - car.z;
+      const d = Math.hypot(dx, dz);
+      if (d >= 2.2 || d === 0) continue;
+      const px = car.x + (dx / d) * 2.2, pz = car.z + (dz / d) * 2.2;
+      if (!city.collideCircle(px, pz, PLAYER.radius)) { p.x = px; p.z = pz; }
+    }
   }
   // Walk animation: swing arms, bob slightly.
   const swing = p.moving ? Math.sin(G.elapsed * 10) * 0.6 : 0;
@@ -677,7 +755,12 @@ function movePlayer(dt, input) {
   const gd = Math.hypot(p.x - city.garage.x, p.z - city.garage.z);
   if (gd < 16) {
     if (G.health < 100) { G.health = Math.min(100, G.health + 6 * dt); hud.setHealth(G.health, G.armor); }
-    if (G.ammo < 12 && G.reserve < 60) { G.reserve = Math.min(60, G.reserve + 4 * dt); }
+    // Restock in whole rounds (4/s) — the reserve must stay an integer.
+    if (G.reserve < 60) {
+      G.restockAcc += dt;
+      while (G.restockAcc >= 0.25 && G.reserve < 60) { G.reserve += 1; G.restockAcc -= 0.25; }
+      if (G.weapon === 'pistol') hud.setArmed(true, G.ammo, G.reserve);
+    }
   }
 }
 
@@ -742,17 +825,9 @@ function update(dt, input) {
     G.player.x = G.player.car.x; G.player.z = G.player.car.z;
     audio.engine(Math.abs(G.player.car.speed) / 38, true);
     hud.setDriving(G.player.car.model.name, Math.abs(G.player.car.speed) * 3.6);
-    // Bump into traffic cars.
-    for (const c of [...G.traffic, ...G.policeCars]) {
-      if (!c.alive || c === G.player.car) continue;
-      const d = Math.hypot(c.x - G.player.car.x, c.z - G.player.car.z);
-      if (d < 3.4) {
-        const push = (3.4 - d) / 2;
-        const nx = (c.x - G.player.car.x) / (d || 1), nz = (c.z - G.player.car.z) / (d || 1);
-        c.x += nx * push; c.z += nz * push;
-        G.player.car.speed *= 0.85; c.speed *= 0.7;
-        if (Math.abs(G.player.car.speed) > 6) audio.crash();
-      }
+    if (G.player.car.health <= 0 && !G.player.car.wreckToasted) {
+      G.player.car.wreckToasted = true;
+      hud.toast('Your car is wrecked — press E to bail out and find another.');
     }
   } else {
     movePlayer(dt, input);
@@ -779,18 +854,61 @@ function update(dt, input) {
         ped.z += Math.cos(ped.heading) * 2.6 * dt;
         ped.mesh.position.set(ped.x, 0, ped.z);
         ped.mesh.rotation.y = ped.heading;
-        if (d < 1.8) { damagePlayer(9 * dt, false); ped.armL.rotation.x = -1.2; }
+        ped.hitCd = Math.max(0, (ped.hitCd || 0) - dt);
+        if (d < 1.8) {
+          ped.armL.rotation.x = -1.2;
+          if (ped.hitCd <= 0) { ped.hitCd = 0.7; damagePlayer(8, false); }
+        }
       }
       continue;
     }
     pedStep(ped, dt, city, rng, G.player.inCar ? G.player.car : null);
   }
-  // Player car running over peds (a crime, and it panics the street).
-  if (G.player.inCar && Math.abs(G.player.car.speed) > 4) {
-    for (const ped of G.peds) {
-      if (!ped.alive) continue;
-      const d = Math.hypot(ped.x - G.player.x, ped.z - G.player.z);
-      if (d < 2) { killPed(ped); G.player.car.speed *= 0.7; }
+  // Body-to-body car collision: parked cars are solid, moving cars push
+  // each other apart, hard hits crumple both cars. Reckless contact at
+  // speed also feeds the wanted heat.
+  resolveCarCollisions([...G.parked, ...G.traffic, ...G.policeCars], (a, b, closing) => {
+    if (closing > 10) {
+      const dmg = (closing - 10) * 0.8;
+      damageCar(a, dmg); damageCar(b, dmg);
+      if (a.isPlayerCar || b.isPlayerCar) {
+        audio.crash();
+        addHeatCrime(0.25, 'Reckless driving! The police noticed.');
+      }
+    } else if ((a.isPlayerCar || b.isPlayerCar) && closing > 6) {
+      audio.crash();
+    }
+  });
+  // Pedestrians vs cars: fast player car = run over (a crime); anything
+  // slower just shoves them aside — and a shove still counts as assault.
+  for (const ped of G.peds) {
+    if (!ped.alive) continue;
+    ped.bumpCd = Math.max(0, (ped.bumpCd || 0) - dt);
+    for (const car of [...G.parked, ...G.traffic, ...G.policeCars]) {
+      if (!car.alive) continue;
+      const d = Math.hypot(ped.x - car.x, ped.z - car.z);
+      if (d >= 1.9) continue;
+      if (car.isPlayerCar && Math.abs(car.speed) > 4) {
+        killPed(ped); car.speed *= 0.7;
+        break;
+      }
+      if (pushPedOutOfCar(ped, car, 1.9)) {
+        ped.panic = Math.max(ped.panic, 2);
+        if (car.isPlayerCar && ped.bumpCd <= 0 && ped.state !== 'goon') {
+          ped.bumpCd = 1;
+          addHeatCrime(0.5, 'You hit someone! The police are on to you.');
+        }
+      }
+    }
+  }
+  // Fractional heat cools off when Rico keeps his nose clean for a while.
+  if (G.heat > 0 && G.elapsed - G.lastCrime > 10) G.heat = Math.max(0, G.heat - 0.05 * dt);
+  // The Safe House patches Rico up: health and armor both refill there.
+  if (G.safehouse && Math.hypot(G.player.x - G.safehouse.x, G.player.z - G.safehouse.z) < 9) {
+    if (G.health < 100 || G.armor < ARMOR.max) {
+      G.health = Math.min(100, G.health + 12 * dt);
+      G.armor = Math.min(ARMOR.max, G.armor + 12 * dt);
+      hud.setHealth(G.health, G.armor);
     }
   }
   policeStep(dt);
@@ -803,11 +921,26 @@ function update(dt, input) {
     if (t.life <= 0) { scene.remove(t.line); G.tracers.splice(i, 1); }
   }
   updateCamera(dt);
-  hud.drawMinimap({
-    city, player: G.player, traffic: G.traffic, policeCars: G.policeCars,
-    missionTarget: G.missionTarget, safehouse: G.safehouse, stashes,
-  });
-  if (!game.staging) renderer.render(scene, camera);
+  // No rendering here: the fixed-step simulation must never paint. One
+  // render per animation frame happens in renderFrame() below — painting
+  // per step was the lag spiral (more lag → more steps → more paints).
+}
+
+// Paint once per animation frame. The minimap is the expensive part, so
+// it redraws at most every 100 ms, or sooner when the player has moved
+// far enough for the map to look stale.
+function renderFrame(forceMinimap) {
+  const moved = Math.hypot(G.player.x - G.lastMinimapX, G.player.z - G.lastMinimapZ);
+  if (forceMinimap || G.elapsed - G.lastMinimapAt >= 0.1 || moved > 3) {
+    hud.drawMinimap({
+      city, player: G.player, traffic: G.traffic, policeCars: G.policeCars,
+      footCops: G.footCops, pierPos: city.pierPos,
+      missionTarget: G.missionTarget, safehouse: G.safehouse, stashes,
+    });
+    G.lastMinimapAt = G.elapsed;
+    G.lastMinimapX = G.player.x; G.lastMinimapZ = G.player.z;
+  }
+  renderer.render(scene, camera);
 }
 
 // ---------- shot mode (deterministic screenshots) ----------
@@ -817,7 +950,7 @@ const game = {
     // staging only places the player and the camera, so shots stay deterministic.
     G.player.x = city.garage.x + 10; G.player.z = city.garage.z + 14;
     G.time = 17.8; // golden hour: low sun, long shadows, sun-soaked streets
-    hud.setCash(G.cash); hud.setHealth(100, 0);
+    hud.setCash(G.cash); hud.setHealth(100, ARMOR.start);
     if (name === 'start') {
       showScreen('title');
       G.camYaw = 0.6; G.camPitch = 0.3;
@@ -827,7 +960,7 @@ const game = {
       showScreen('play');
       G.camMode = 1; // wider chase camera so the shot shows more of the city
       const car = G.parked[0];
-      G.player.inCar = true; G.player.car = car; playerMesh.group.visible = false;
+      G.player.inCar = true; G.player.car = car; car.isPlayerCar = true; playerMesh.group.visible = false;
       if (name === 'drive') {
         // Cruise the central avenue so the shot shows the city, traffic and the HUD.
         car.x = 3.5; car.z = -120; car.heading = 0; car.speed = 14;
@@ -844,15 +977,21 @@ const game = {
       G.camMode = 1; // wider chase camera so the interceptors read in-frame
       setWanted(3, 'The deal went loud!');
       const car = G.parked[0];
-      G.player.inCar = true; G.player.car = car; playerMesh.group.visible = false;
-      car.x = 3.5; car.z = -100; car.heading = 0; car.speed = 20;
+      G.player.inCar = true; G.player.car = car; car.isPlayerCar = true; playerMesh.group.visible = false;
+      car.x = 3.5; car.z = -100; car.heading = 0; car.speed = 18;
       G.player.x = car.x; G.player.z = car.z;
-      // Three interceptors converge on the avenue — two from side streets, one from behind —
-      // so the chase reads in-frame without ramming the player to a stop.
-      G.policeCars.push(makePoliceCar(scene, -3.5, 60, Math.PI));
-      G.policeCars.push(makePoliceCar(scene, 25, 120, -Math.PI / 2));
-      G.policeCars.push(makePoliceCar(scene, -25, 150, Math.PI / 2));
-      G.policeCars.push(makePoliceCar(scene, 3.5, -170, 0));
+      // All four interceptors start ahead on the same avenue, in the two
+      // lanes, 20–44 m in front — where the chase camera can see them.
+      // (They used to sit 160–250 m away, one of them inside a building:
+      // only one ever read in-frame.) The chase AI turns them onto Rico
+      // from there; shots.js stages 54 steps, the moment all four are
+      // converging in-frame — run it longer and Rico (top speed 38)
+      // simply outruns the interceptors (top speed 30) out of shot.
+      const copA = makePoliceCar(scene, -3.5, -80, 0); copA.speed = 14;
+      const copB = makePoliceCar(scene, 3.5, -72, 0); copB.speed = 14;
+      const copC = makePoliceCar(scene, -3.5, -64, 0); copC.speed = 14;
+      const copD = makePoliceCar(scene, 3.5, -56, 0); copD.speed = 14;
+      G.policeCars.push(copA, copB, copC, copD);
       hud.showObjective('Job 4 — Hot Afternoon', 'Lose the cops, then reach the safe house.');
       hud.setSub('3 stars — break line of sight, then reach the safe house.');
     }
@@ -875,13 +1014,14 @@ const game = {
     update(dt, input);
   },
   endShot(name) {
-    renderer.render(scene, camera);
+    renderFrame(true); // the one paint staging was saving up for
     if (name === 'start') hud.showObjective('Welcome to Solara Bay', 'Press Enter to start.');
   },
 };
 
 // ---------- main loop ----------
 let last = performance.now(), acc = 0;
+const MAX_STEPS_PER_FRAME = 5;
 function frame(now) {
   requestAnimationFrame(frame);
   const dtReal = Math.min((now - last) / 1000, 0.25);
@@ -889,20 +1029,27 @@ function frame(now) {
   if (G.screen === 'play') {
     acc += dtReal;
     const input = readInput();
-    while (acc >= STEP) { update(STEP, input); acc -= STEP; }
+    let steps = 0;
+    while (acc >= STEP && steps < MAX_STEPS_PER_FRAME) { update(STEP, input); acc -= STEP; steps += 1; }
+    // Drop any leftover backlog instead of spiralling: under heavy lag
+    // the game slows down a touch rather than painting itself to death.
+    if (acc >= STEP) acc = 0;
+    renderFrame(false);
   } else if (G.screen === 'title') {
     // Living backdrop behind the title: traffic rolls, clouds drift.
     acc += dtReal;
-    while (acc >= STEP) {
+    let steps = 0;
+    while (acc >= STEP && steps < MAX_STEPS_PER_FRAME) {
       G.elapsed += STEP;
       updateSky(STEP);
       for (const c of G.traffic) trafficStep(c, STEP, city, rng);
       for (const ped of G.peds) pedStep(ped, STEP, city, rng, null);
       G.camYaw += STEP * 0.03;
       updateCamera(STEP);
-      renderer.render(scene, camera);
-      acc -= STEP;
+      acc -= STEP; steps += 1;
     }
+    if (acc >= STEP) acc = 0;
+    renderFrame(false);
   }
 }
 
@@ -916,7 +1063,7 @@ playerMesh.group.position.set(G.player.x, 0, G.player.z);
 refreshContinue();
 hud.setCash(G.cash);
 hud.setStars(0);
-hud.setHealth(100, 0);
+hud.setHealth(100, G.armor);
 hud.showObjective('Welcome to Solara Bay', 'Press Enter or click New Game to start. Steal a car, run Mara\'s jobs, stay ahead of the police.');
 if (shot) {
   // Deterministic screenshot scenes run once, paint, and signal readiness.

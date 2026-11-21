@@ -52,6 +52,29 @@
   #pause { background: rgba(4,10,18,.72); }
   .hidden { display: none !important; }
   #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #0b1622; font-size: 16px; z-index: 5; }
+  /* Narrow screens: shrink the HUD pieces so the mission box, bars and
+     minimap stop colliding with each other. */
+  @media (max-width: 760px) {
+    #hud-top-left { max-width: calc(100vw - 190px); }
+    #mission-title { font-size: 13px; }
+    #mission-text { font-size: 12px; }
+    #stars { font-size: 19px; letter-spacing: 2px; min-height: 24px; }
+    #cash { font-size: 20px; }
+    .bar { width: 130px; }
+    #minimap { width: 128px; height: 128px; }
+    #speed { font-size: 24px; }
+    #ammo { bottom: 70px; font-size: 15px; }
+    #hint { white-space: normal; max-width: 92vw; text-align: center; font-size: 11px; bottom: 150px; }
+    .panel h1 { font-size: 32px; }
+    .panel { padding: 20px 18px; }
+  }
+  @media (max-width: 480px) {
+    #hud-top-left { max-width: calc(100vw - 150px); }
+    .bar { width: 100px; }
+    #minimap { width: 100px; height: 100px; }
+    #hint { bottom: 118px; }
+    #stash { font-size: 11px; }
+  }
 </style>
 </head>
 <body>
@@ -93,8 +116,8 @@
       run jobs, build your name, and don't get caught.</p>
       <div class="controls">
         <b>W A S D</b> move / drive &nbsp;·&nbsp; <b>Mouse drag</b> look around &nbsp;·&nbsp; <b>Shift</b> sprint<br>
-        <b>E</b> enter / exit car (steal parked &amp; traffic cars) &nbsp;·&nbsp; <b>Space</b> handbrake / jump<br>
-        <b>F</b> punch &nbsp;·&nbsp; <b>Mouse click</b> shoot pistol &nbsp;·&nbsp; <b>R</b> reload &nbsp;·&nbsp; <b>1 / 2</b> fists / pistol<br>
+        <b>E</b> enter / exit car (steal parked &amp; traffic cars) &nbsp;·&nbsp; <b>Space</b> handbrake<br>
+        <b>F</b> punch &nbsp;·&nbsp; <b>Mouse click</b> shoot pistol (on foot) &nbsp;·&nbsp; <b>R</b> reload &nbsp;·&nbsp; <b>1 / 2</b> fists / pistol<br>
         <b>P</b> save game &nbsp;·&nbsp; <b>Esc</b> pause &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; <b>C</b> change camera
       </div>
       <div class="btnrow">
@@ -102,10 +125,15 @@
         <button id="btn-continue" class="secondary hidden">Continue — saved game</button>
         <button id="btn-how" class="secondary">How to play</button>
       </div>
-      <p id="how-text" class="hidden">Follow the yellow marker. Gold = your next job. Blue = safe house.
-      Red = trouble. Wanted stars rise when the police see a crime — break line of sight and lay low
-      to cool off. Gold Sun Stashes hide around the city — grab all 8 for $50 each. Cars respawn at garages, health at the clinic, ammo at the gun shop. Your progress
-      saves automatically after every job, or press P any time.</p>
+      <p id="how-text" class="hidden">Follow the gold marker to your next job. On the minimap: gold = job target
+      and Sun Stashes, blue square = safe house, red = police cars, blue dots = officers on foot.
+      Wanted stars rise for crimes the police notice — stealing cars, punching or shooting people,
+      reckless crashes. Break line of sight and lay low to cool off. Your blue armor bar soaks half
+      of every hit; the safe house restores health and armor, and standing by Mara's Garage slowly
+      heals you and restocks ammo. Cars take damage too — a wrecked car won't drive, so press E and
+      find another. Gold Sun Stashes hide around the city — grab all 8 for $50 each. Get wasted or
+      busted and you wake up at the clinic, $200 lighter, with the heat still on. Your progress saves
+      automatically after every job, or press P any time.</p>
       <p style="font-size:12px;opacity:.6">An original game. Solara Bay, its people and its streets are invented — no real city, no licensed cars, no borrowed characters.</p>
     </div>
   </div>

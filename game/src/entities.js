@@ -54,6 +54,10 @@ export function makeCar(scene, model, x, z, heading, kind) {
     x, z, heading, speed: 0, steer: 0,
     driver: null, // ped inside (for stealable traffic cars)
     alive: true, wanted: false, stuck: 0,
+    // Every car has its own health now: crashes, rams and beatings wear
+    // it down, a wrecked car (health 0) will not drive any more.
+    health: CAR.health, maxHealth: CAR.health,
+    ramCd: 0, wreckToasted: false, isPlayerCar: false,
     length: group.userData.length,
   };
 }
@@ -92,6 +96,8 @@ export function makePed(scene, rng, x, z) {
     kind: 'ped', mesh: g, armL, armR, x, z, heading: rng.range(0, Math.PI * 2),
     speed: rng.range(1.1, 1.9), state: 'walk', panic: 0, health: 30,
     target: null, wait: 0, alive: true, phase: rng.range(0, Math.PI * 2),
+    hitCd: 0, // melee cooldown for cops / the goon (discrete hits, not per-step drain)
+    bumpCd: 0, // cooldown so one slow nudge counts as one reckless bump
   };
 }
 
@@ -129,12 +135,81 @@ function resolveOverlap(car, city) {
   }
 }
 
+// --- car damage & body-to-body collision ------------------------------------
+// Damage a car; returns true when this hit wrecked it (health reached 0).
+export function damageCar(car, amount) {
+  if (!car || !car.alive || typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) return false;
+  car.health = Math.max(0, car.health - amount);
+  return car.health <= 0;
+}
+
+const CAR_RADIUS = 1.7; // circle approximation of a car body for push-apart
+
+// Push overlapping cars apart so no two bodies ever share space. Parked
+// cars are solid: the moving car takes the whole push (and the speed
+// loss), the parked car stays put. Two moving cars split the push.
+// `onHit(a, b, closingSpeed)` fires once per resolved pair so the caller
+// can apply crash damage, sound and wanted heat. Cheap O(n²) over the
+// small street population (~27 cars worst case).
+export function resolveCarCollisions(cars, onHit) {
+  let hits = 0;
+  for (let i = 0; i < cars.length; i += 1) {
+    const a = cars[i];
+    if (!a.alive) continue;
+    for (let j = i + 1; j < cars.length; j += 1) {
+      const b = cars[j];
+      if (!b.alive) continue;
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const d = Math.hypot(dx, dz);
+      const minD = CAR_RADIUS * 2;
+      if (d >= minD) continue;
+      // Dead-centre overlap: pick an arbitrary axis so they still separate.
+      const nx = d > 0.001 ? dx / d : 1, nz = d > 0.001 ? dz / d : 0;
+      const overlap = minD - Math.max(d, 0.001);
+      const aFixed = a.kind === 'parked' && !a.isPlayerCar;
+      const bFixed = b.kind === 'parked' && !b.isPlayerCar;
+      if (aFixed && bFixed) continue; // two parked cars never move each other
+      if (aFixed) { b.x += nx * overlap; b.z += nz * overlap; }
+      else if (bFixed) { a.x -= nx * overlap; a.z -= nz * overlap; }
+      else {
+        a.x -= nx * overlap / 2; a.z -= nz * overlap / 2;
+        b.x += nx * overlap / 2; b.z += nz * overlap / 2;
+      }
+      const closing = Math.abs(a.speed) + Math.abs(b.speed);
+      if (!aFixed) a.speed *= 0.85;
+      if (!bFixed) b.speed *= 0.85;
+      a.mesh.position.set(a.x, 0, a.z);
+      b.mesh.position.set(b.x, 0, b.z);
+      hits += 1;
+      if (onHit) onHit(a, b, closing);
+    }
+  }
+  return hits;
+}
+
+// Push a pedestrian out of a car's circle (a slow car nudges people
+// aside instead of driving through them). Returns true when pushed.
+export function pushPedOutOfCar(ped, car, radius) {
+  const r = radius || 1.9;
+  const dx = ped.x - car.x, dz = ped.z - car.z;
+  const d = Math.hypot(dx, dz);
+  if (d >= r) return false;
+  const nx = d > 0.001 ? dx / d : 1, nz = d > 0.001 ? dz / d : 0;
+  ped.x = car.x + nx * r;
+  ped.z = car.z + nz * r;
+  ped.mesh.position.set(ped.x, 0, ped.z);
+  return true;
+}
+
 // --- arcade car physics ------------------------------------------------------
 export function driveCar(car, input, dt, city) {
   resolveOverlap(car, city);
-  const max = CAR.maxSpeed * car.model.speed;
-  if (input.forward) car.speed += CAR.accel * dt;
-  if (input.back) car.speed -= (car.speed > 0.5 ? CAR.brake : CAR.accel * 0.6) * dt;
+  const wrecked = car.health <= 0;
+  // A badly damaged engine limps; a wrecked one only coasts to a stop.
+  const max = wrecked ? 0 : CAR.maxSpeed * car.model.speed * (car.health < 30 ? 0.55 : 1);
+  const speedBefore = car.speed;
+  if (!wrecked && input.forward) car.speed += CAR.accel * dt;
+  if (!wrecked && input.back) car.speed -= (car.speed > 0.5 ? CAR.brake : CAR.accel * 0.6) * dt;
   if (!input.forward && !input.back) car.speed -= Math.sign(car.speed) * 6 * dt;
   if (input.handbrake) car.speed -= Math.sign(car.speed) * 22 * dt;
   if (Math.abs(car.speed) < 0.15 && !input.forward && !input.back) car.speed = 0;
@@ -147,6 +222,8 @@ export function driveCar(car, input, dt, city) {
   const nz = car.z + Math.cos(car.heading) * car.speed * dt;
   const hit = city.collideCircle(nx, nz, 1.3);
   if (hit) {
+    // Hitting a building at speed crumples the car, not just the paint.
+    if (Math.abs(speedBefore) > 6) damageCar(car, (Math.abs(speedBefore) - 6) * 1.2);
     // Slide along the wall instead of stopping dead.
     const hitX = city.collideCircle(nx, car.z, 1.3);
     const hitZ = city.collideCircle(car.x, nz, 1.3);
@@ -177,7 +254,14 @@ export function driveCar(car, input, dt, city) {
 // --- traffic AI: follow the road grid, turn at intersections -----------------
 export function trafficStep(car, dt, city, rng) {
   if (!car.alive) return;
-  const target = 9 * car.model.speed;
+  // A wrecked traffic car just sits there (still solid for everyone else).
+  if (car.health <= 0) {
+    car.speed = 0;
+    car.mesh.position.set(car.x, 0, car.z);
+    car.mesh.rotation.y = car.heading;
+    return;
+  }
+  const target = 9 * car.model.speed * (car.health < 30 ? 0.6 : 1);
   car.speed += (target - car.speed) * Math.min(1, dt * 0.8);
   // Are we near an intersection? Maybe turn.
   const nearX = city.roadLines.some(l => Math.abs(car.x - l) < 2.5);

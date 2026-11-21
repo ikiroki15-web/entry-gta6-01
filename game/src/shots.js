@@ -4,7 +4,10 @@
 // Round-3 shots are staged at golden hour (17.8) with the wider chase camera for drive/chase.
 import { STEP } from './config.js';
 
-const STEPS = { start: 60, drive: 60 * 6, chase: 150, mission: 72 };
+// Chase stages only 54 steps: that is the convergence moment when all
+// four interceptors are in-frame. Longer and the player outruns them
+// (38 vs 30 top speed) and the shot empties out.
+const STEPS = { start: 60, drive: 60 * 6, chase: 54, mission: 72 };
 
 export function stageShot(name, game) {
   const n = STEPS[name] ?? STEPS.start;
